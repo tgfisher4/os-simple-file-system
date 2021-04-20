@@ -1,0 +1,4 @@
+*.o
+simplefs
+.vimrc
+setup.sh
