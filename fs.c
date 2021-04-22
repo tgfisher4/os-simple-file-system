@@ -113,12 +113,33 @@ int fs_mount()
 
 int fs_create()
 {
+	// Use bitmap to identify a free inode in the inode table block
+	inumber = 
+	block_num = INODE_TABLE_START_BLOCK + fs_get_inode_block(inumber)
+	block_offset = fs_get_inode_offset(inumber);
+
+	// Initialize the inode struct
+	struct fs_inode new_inode;
+	new_inode.isvalid = 1;
+	new_inode.size = 0;
+
+	// Read block from disk
+	union fs_block block_buffer;
+	disk_read(block_num, block_buffer.data);
+
+	// Write the inode struct to free inode position
+	block_buffer.inodes[block_offset] = new_inode;
+
+	// Write back the block
+	disk_write(block_num, block_buffer.data);
+	
     return 0;
 }
 
 int fs_delete( int inumber )
 {
-    return 0;
+    // 
+	return 0;
 }
 
 int fs_getsize( int inumber )
