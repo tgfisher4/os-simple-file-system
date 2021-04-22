@@ -18,9 +18,8 @@
 #define DATA_POINTERS_PER_BLOCK 1024  // = DISK_BLOCK_SIZE / DATA_POINTER_SIZE
 #define INODE_TABLE_START_BLOCK 1     // inode table start immediately after superblock
 
-bitmap_t inode_table_bitmap;
-bitmap_t data_block_bitmap;
-
+/* types */
+typedef unsigned char* bitmap_t;
 struct fs_superblock {
     int magic;
     int nblocks;
@@ -41,6 +40,46 @@ union fs_block {
     int pointers[DATA_POINTERS_PER_BLOCK];
     char data[DISK_BLOCK_SIZE];
 };
+
+/* helper function prototypes */
+bitmap_t bitmap_create(int n_bits);
+void     bitmap_delete(bitmap_t bitmap);
+bool     bitmap_test(bitmap_t bitmap, int idx);
+void     bitmap_set(bitmap_t bitmap, int idx, bool val);
+
+void     load_inode(int inumber, struct fs_inode *inode);
+int      fs_walk_inode_table(int from_inumber, struct fs_inode* inode);
+int      fs_walk_inode_data(int for_inumber, struct fs_inode* for_inode, char *data);
+
+/* globals */
+bitmap_t inode_table_bitmap;
+bitmap_t disk_block_bitmap;
+
+/* function definitions */
+// guidance from: https://stackoverflow.com/questions/10080832/c-i-need-some-guidance-in-how-to-create-dynamic-sized-bitmaps
+bitmap_t bitmap_create(int n_bits){
+    if( n_bits <= 0 ) return NULL;
+    // add 7 to round integer division up
+    bitmap_t to_return = malloc((sizeof(*to_return) * n_bits + 7) / 8);
+    if( !to_return ){
+        printf("ERROR Failed to allocate memory. Exiting...\n");
+        abort();
+    }
+    return to_return;
+}
+
+void bitmap_delete(bitmap_t bitmap){
+    free(bitmap);
+}
+
+bool bitmap_test(bitmap_t bitmap, int idx){
+    return bitmap[idx / 8] & (1 << (idx % 8));
+}
+
+void bitmap_set(bitmap_t bitmap, int idx, bool val){
+    if( bitmap_test(bitmap, idx) == val ) return;
+    bitmap[idx / 8] ^= 1 << (idx % 8);
+}
 
 int fs_format()
 {
@@ -115,7 +154,7 @@ int fs_walk_inode_table(int from_inumber, struct fs_inode *next_inode){
     static union fs_block buffer_block;
     static int curr_inumber = 1;
     static int ninodes = -1;
-    static bool should_load_block = true;
+    //static bool should_load_block = true;
     if( ninodes < 0 ){
         disk_read(0, buffer_block.data);
         ninodes = buffer_block.super.ninodes;
@@ -136,7 +175,7 @@ int fs_walk_inode_table(int from_inumber, struct fs_inode *next_inode){
         disk_read(inode_table_idx + INODE_TABLE_START_BLOCK, buffer_block.data);
     }
     // use memcpy because we don't want to assign next_inode to a memory address on the stack
-    memcpy(next_inode, &buffer_block.inodes[inode_block_idx], sizeof(struct inode));
+    memcpy(next_inode, &buffer_block.inodes[inode_block_idx], sizeof(struct fs_inode));
 
     return curr_inumber++;
 }
@@ -148,14 +187,15 @@ int fs_walk_inode_data(int for_inumber, struct fs_inode *for_inode, char *data){
     static union fs_block ind_ptr_blk = {.pointers[0] = -1};
 
     // initialization
-    if( inumber >= 1 || for_inode ){
+    if( for_inumber >= 1 || for_inode ){
         curr_block = 0;
         ind_ptr_blk.pointers[0] = -1;
-        if( inumber > 0 )   load_inode(inumber, &inode); // err check load_inode?
+        if( for_inumber > 0 )   load_inode(for_inumber, &inode); // err check load_inode?
         else                inode = *for_inode;
     }
     // short-circuit if no more data
     if( DISK_BLOCK_SIZE * curr_block >= inode.size || curr_block >= DATA_POINTERS_PER_INODE + DATA_POINTERS_PER_BLOCK ) return -1;
+    int read_from;
     // read from direct pointers
     if( curr_block < DATA_POINTERS_PER_INODE ){
         read_from = inode.direct[curr_block];
@@ -166,43 +206,18 @@ int fs_walk_inode_data(int for_inumber, struct fs_inode *for_inode, char *data){
         read_from = ind_ptr_blk.pointers[curr_block - DATA_POINTERS_PER_INODE];
     }
     curr_block++;
-    disk_read(read_from, data);
+    if( data ) disk_read(read_from, data);
     return read_from;
 }
 
-// guidance from: https://stackoverflow.com/questions/10080832/c-i-need-some-guidance-in-how-to-create-dynamic-sized-bitmaps
-typedef unsigned char* bitmap_t;
-bitmap_t bitmap_create(int n_bits){
-    if( n_bits <= 0 ) return NULL;
-    // add 7 to round integer division up
-    bitmap_t to_return = malloc((sizeof(*to_return) * n_bits + 7) / 8);
-    if( !to_return ){
-        printf("ERROR Failed to allocate memory. Exiting...\n");
-        abort();
-    }
-    return to_return;
-}
 
-void bitmap_delete(bitmap_t bitmap){
-    free(bitmap);
-}
-
-bool bitmap_test(bitmap_t bitmap, int idx){
-    return bitmap[idx / 8] & (1 << (idx % 8));
-}
-
-void bitmap_set(bitmap_t bitmap, int idx, int val){
-    if( bitmap_test(bitmap, idx) == val ) return;
-    bitmap[idx / 8] ^= 1 << (idx % 8);
-}
-
-void inode_load(int inumber, struct fs_inode *inode){
+void load_inode(int inumber, struct fs_inode *inode){
     int inode_table_idx = inumber / INODES_PER_BLOCK;
     int inode_block_idx = inumber % INODES_PER_BLOCK;
 
     union fs_block buffer_block;
     disk_read(inode_table_idx, buffer_block.data);
-    memcpy(inode, buffer_block[inode_block_idx]);
+    memcpy(inode, &buffer_block.inodes[inode_block_idx], DISK_BLOCK_SIZE);
 }
 
 int fs_mount(){
@@ -216,14 +231,16 @@ int fs_mount(){
     disk_block_bitmap = bitmap_create(buffer_block.super.nblocks);
 
     // initialize data_region_bitmap: mark superblock and inode table blocks as allocated, rest as free
-    for( int i = 0; i < super.nblocks + 1; i++ ) bitmap_set(disk_block_bitmap, i, !(i < super.ninodeblocks + 1));
+    for( int i = 0; i < buffer_block.super.nblocks + 1; i++ ) bitmap_set(disk_block_bitmap, i, !(i < buffer_block.super.ninodeblocks + 1));
 
     struct fs_inode inode;
     bitmap_set(inode_table_bitmap, 0, 0); // inode 0 is not available for use
     for( int inumber = fs_walk_inode_table(1, &inode); inumber > 0; inumber = fs_walk_inode_table(-1, &inode) ){
         bitmap_set(inode_table_bitmap, inumber, !inode.isvalid);
-        for( int data_block_num = fs_walk_inode_data(0, &inode, buffer_block.data); data_block_num > 0; data_block_num = fs_walk_inode_data(0, NULL, buffer_block.data) ){
+        printf("inode %d %s occupied\n", inumber, inode.isvalid ? "is" : "is not");
+        for( int data_block_num = fs_walk_inode_data(0, &inode, NULL); data_block_num > 0; data_block_num = fs_walk_inode_data(0, NULL, NULL) ){
             bitmap_set(disk_block_bitmap, data_block_num, 0);
+            printf("block %d occupied by inode %d\n", data_block_num, inumber);
         }
     }
 
