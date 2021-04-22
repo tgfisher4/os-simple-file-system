@@ -114,9 +114,19 @@ int fs_mount()
 int fs_create()
 {
 	// Use bitmap to identify a free inode in the inode table block
-	inumber = 
-	block_num = INODE_TABLE_START_BLOCK + fs_get_inode_block(inumber)
-	block_offset = fs_get_inode_offset(inumber);
+	union fs_block block_buffer;
+	disk_read(0, block_buffer.data);
+	inumber = 0;
+	for (int i = 1; i <= block_buffer.super.ninodes; i++) {
+		inumber = bitmap_test(inode_table_bitmap, i);
+		if (inumber) break;
+	}
+	if (!inumber) {
+		// No free inodes; return zero
+		return 0;
+	}
+	int block_num = INODE_TABLE_START_BLOCK + fs_get_inode_block(inumber);
+	int block_offset = fs_get_inode_offset(inumber);
 
 	// Initialize the inode struct
 	struct fs_inode new_inode;
@@ -124,7 +134,6 @@ int fs_create()
 	new_inode.size = 0;
 
 	// Read block from disk
-	union fs_block block_buffer;
 	disk_read(block_num, block_buffer.data);
 
 	// Write the inode struct to free inode position
@@ -132,14 +141,39 @@ int fs_create()
 
 	// Write back the block
 	disk_write(block_num, block_buffer.data);
-	
-    return 0;
+    return inumber;
 }
 
 int fs_delete( int inumber )
-{
-    // 
-	return 0;
+{	
+	// Validate valid inumber
+	union fs_block block_buffer;
+	disk_read(0, block_buffer.data);
+	if ((inumber < 1) || (inumber > block_buffer.super.ninodes))
+		return 0; // Invalid inumber
+
+	// Read the inode, update the isvald bit, and write back
+	int block_num = INODE_TABLE_START_BLOCK + fs_get_inode_block(inumber);
+	int block_offset = fs_get_inode_offset(inumber);
+
+	union fs_block block_buffer;
+	disk_read(block_num, block_buffer.data);
+	if (block_buffer.inodes[block_offset].isvalid == 0) {
+		// Return 0 -- attempting to delete an inode that's not yet created
+		return 0;
+	};
+	block_buffer.inodes[block_offset].isvalid = 0;
+	disk_write(block_num, block_buffer.data);
+
+	// Walk the data blocks, free them, and update the bitmap
+	for ( int data_block_num = fs_walk_inode_data(inumber, 0, NULL); data_block_num > 0; data_block_num = fs_walk_inode_data(NULL, NULL, NULL) ) {
+		bitmap_set(data_block_bitmap, data_block_num, 1);
+	}
+	
+	// Update the inode table bitmap
+	bitmap_set(inode_table_bitmap, inumber, 1)
+    
+	return 1;
 }
 
 int fs_getsize( int inumber )
