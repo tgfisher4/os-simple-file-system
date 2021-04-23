@@ -52,6 +52,8 @@ void     bitmap_delete(bitmap_t bitmap);
 bool     bitmap_test(bitmap_t bitmap, int idx);
 void     bitmap_set(bitmap_t bitmap, int idx, bool val);
 void     bitmap_print(bitmap_t bitmap, int n_bits);
+  
+int      min(int first, int second);
 
 void     load_inode(int inumber, struct fs_inode *inode);
 int      walk_inode_table(int from_inumber, struct fs_inode* inode);
@@ -103,6 +105,10 @@ void bitmap_print(bitmap_t bitmap, int n_bits){
         printf("\n");
     }
     printf("BITMAP END\n");
+}
+  
+int min( int first, int second ) {
+	return first < second ? first : second;
 }
 
 int fs_format() {
@@ -344,9 +350,46 @@ int fs_getsize( int inumber )
     return -1;
 }
 
-int fs_read( int inumber, char *data, int length, int offset )
-{
-    return 0;
+int fs_read( int inumber, char *data, int length, int offset ) {
+	union fs_block buffer_block;
+	int bytes_read = 0;
+
+	// read superblock and check validity of inumber
+	disk_read(0, buffer_block.data);
+	if ( inumber < 0 || inumber >= buffer_block.super.ninodes )	return 0;
+	
+	// read inode's corresponding block from disk
+	int block = inumber / INODES_PER_BLOCK;
+	disk_read(block + INODE_TABLE_START_BLOCK, buffer_block.data);
+
+	// choose correct inode from block and verify validity
+	struct fs_inode inode = buffer_block.inodes[inumber % INODES_PER_BLOCK];
+	if ( !inode.isvalid || offset >= inode.size )	return 0;
+	
+	// read data byte-by-byte from direct pointers unless and until end	
+	//int direct_blocks = min(DATA_POINTERS_PER_INODE, 1 + (inode.size / DATA_POINTERS_PER_BLOCK));
+	int distance = min(length, inode.size - offset);
+	int i = offset / DISK_BLOCK_SIZE;
+	int j = offset % DISK_BLOCK_SIZE;
+	for ( ; i < DATA_POINTERS_PER_INODE && bytes_read <= distance; ++i, j=0 ) {
+		disk_read(inode.direct[i], buffer_block.data);
+		for ( ; j < DISK_BLOCK_SIZE && bytes_read <= distance; ++j ) {
+			data[bytes_read++] = buffer_block.data[j];
+		}
+	}
+
+	// read data from indirect block (if necessary)
+	disk_read(inode.indirect, buffer_block.data);
+    int indirected_pointers[DATA_POINTERS_PER_BLOCK];
+	memcpy(indirected_pointers, buffer_block.pointers, DATA_POINTERS_PER_BLOCK);	
+	for ( i -= DATA_POINTERS_PER_INODE; i < DATA_POINTERS_PER_BLOCK && bytes_read <= distance; ++i, j=0 ) {
+		disk_read(indirected_pointers[i], buffer_block.data);
+		for ( ; j < DISK_BLOCK_SIZE && bytes_read <= distance; ++j ) {
+			data[bytes_read++] = buffer_block.data[j];
+		}
+	}
+	
+    return --bytes_read;
 }
 
 int fs_write( int inumber, const char *data, int length, int offset )
