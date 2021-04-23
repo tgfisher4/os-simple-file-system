@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <stdbool.h>
 
+/* macros */
 // unfortunately, must define macros to use in struct definitions whose values are really arbitrary
 // can represent them as expressions of other macros, but then have to compute the value on every use
 #define FS_MAGIC                0xf0f03410
@@ -17,6 +18,7 @@
 #define INODES_PER_BLOCK         128  // = DISK_BLOCK_SIZE / INODE_SIZE
 #define DATA_POINTERS_PER_BLOCK 1024  // = DISK_BLOCK_SIZE / DATA_POINTER_SIZE
 #define INODE_TABLE_START_BLOCK    1  // inode table start immediately after superblock
+
 
 /* types */
 typedef unsigned char* bitmap_t;
@@ -41,6 +43,7 @@ union fs_block {
     char data[DISK_BLOCK_SIZE];
 };
 
+
 /* helper function prototypes */
 // true bitmap: one bit per entry
 // bits 0-7 in 0, 8-15 in 1, etc - access via `bitmap[bit / 8] & (1 << bit % 8)`
@@ -54,10 +57,12 @@ void     load_inode(int inumber, struct fs_inode *inode);
 int      walk_inode_table(int from_inumber, struct fs_inode* inode);
 int      walk_inode_data(int for_inumber, struct fs_inode* for_inode, char *data);
 
+
 /* globals */
 bitmap_t inode_table_bitmap;
 bitmap_t disk_block_bitmap;
 bool     is_mounted;
+
 
 /* function definitions */
 // guidance from: https://stackoverflow.com/questions/10080832/c-i-need-some-guidance-in-how-to-create-dynamic-sized-bitmaps
@@ -100,9 +105,38 @@ void bitmap_print(bitmap_t bitmap, int n_bits){
     printf("BITMAP END\n");
 }
 
-int fs_format()
-{
-    return 0;
+int fs_format() {
+	// don't format: already mounted
+	if (is_mounted)	return 0;
+
+	union fs_block buffer_block;
+	
+	// read superblock
+	disk_read(0, buffer_block.data);
+    struct fs_superblock *superblock = &buffer_block.super;
+
+	// set superblock values
+	superblock->magic = FS_MAGIC;
+	superblock->nblocks = disk_size();
+	// compute 10% of blocks for inodes
+	int ninodeblocks_temp = superblock->nblocks / 10;
+	superblock->ninodeblocks = ninodeblocks_temp;
+	superblock->ninodes = superblock->ninodeblocks * INODES_PER_BLOCK;
+
+	// write superblock values
+	disk_write(0, buffer_block.data);
+
+	// traverse inode table and invalidate - update with itok()?
+    for( int block = 0; block < ninodeblocks_temp; ++block ) {
+        disk_read(block + INODE_TABLE_START_BLOCK, buffer_block.data);
+        struct fs_inode *inodes = buffer_block.inodes;
+        for( int i = 0; i < INODES_PER_BLOCK; ++i ) {
+            inodes[i].isvalid = 0;
+		}
+		disk_write(block + INODE_TABLE_START_BLOCK, buffer_block.data);
+	}
+
+    return 1;
 }
 
 void fs_debug(){
