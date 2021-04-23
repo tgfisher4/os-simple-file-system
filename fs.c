@@ -116,7 +116,7 @@ int fs_create()
 	// Use bitmap to identify a free inode in the inode table block
 	union fs_block block_buffer;
 	disk_read(0, block_buffer.data);
-	inumber = 0;
+	int inumber = 0;
 	for (int i = 1; i <= block_buffer.super.ninodes; i++) {
 		inumber = bitmap_test(inode_table_bitmap, i);
 		if (inumber) break;
@@ -156,7 +156,6 @@ int fs_delete( int inumber )
 	int block_num = INODE_TABLE_START_BLOCK + fs_get_inode_block(inumber);
 	int block_offset = fs_get_inode_offset(inumber);
 
-	union fs_block block_buffer;
 	disk_read(block_num, block_buffer.data);
 	if (block_buffer.inodes[block_offset].isvalid == 0) {
 		// Return 0 -- attempting to delete an inode that's not yet created
@@ -166,12 +165,12 @@ int fs_delete( int inumber )
 	disk_write(block_num, block_buffer.data);
 
 	// Walk the data blocks, free them, and update the bitmap
-	for ( int data_block_num = fs_walk_inode_data(inumber, 0, NULL); data_block_num > 0; data_block_num = fs_walk_inode_data(NULL, NULL, NULL) ) {
-		bitmap_set(data_block_bitmap, data_block_num, 1);
+	for ( int i = fs_walk_inode_data(inumber, 0, NULL); i > 0; i = fs_walk_inode_data(NULL, NULL, NULL) ) {
+		bitmap_set(data_block_bitmap, i, 1);
 	}
 	
 	// Update the inode table bitmap
-	bitmap_set(inode_table_bitmap, inumber, 1)
+	bitmap_set(inode_table_bitmap, inumber, 1);
     
 	return 1;
 }
@@ -189,4 +188,32 @@ int fs_read( int inumber, char *data, int length, int offset )
 int fs_write( int inumber, const char *data, int length, int offset )
 {
     return 0;
+}
+
+int fs_defrag()
+{
+
+	/*  Create a temporary inode table and data region to hold defragged data */
+	union fs_block block_buffer;
+	disk_read(0, block_buffer.data);
+
+	int new_inumber = 1; // Next available position in defragged inode table
+	int ninodeblocks = block_buffer.super.ninodeblocks;
+	int new_data_index = ninodeblocks + INODE_TABLE_START_BLOCK;  // Next available block in defragged data region
+	int ninodes = block_buffer.super.ninodes;
+	
+	union fs_block* defrag_inode_table = malloc(sizeof(union fs_block) * ninodes);
+	
+	/* Iterate through inode blocks */
+	for (int i = INODE_TABLE_START_BLOCK; i <= ninodeblocks; i++) {
+		disk_read(i, block_buffer.data);
+		// Iterate through each inode in the block
+		for (int j = 0; j < INODES_PER_BLOCK; j++) {
+			// If inode is valid, add to defragged table and defrag data region
+			if ( !bitmap_test(inode_table_bitmap) && ), j
+		}
+		
+	}
+
+	return 0;
 }
