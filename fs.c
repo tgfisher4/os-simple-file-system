@@ -189,31 +189,3 @@ int fs_write( int inumber, const char *data, int length, int offset )
 {
     return 0;
 }
-
-int fs_defrag()
-{
-
-	/*  Create a temporary inode table and data region to hold defragged data */
-	union fs_block block_buffer;
-	disk_read(0, block_buffer.data);
-
-	int new_inumber = 1; // Next available position in defragged inode table
-	int ninodeblocks = block_buffer.super.ninodeblocks;
-	int new_data_index = ninodeblocks + INODE_TABLE_START_BLOCK;  // Next available block in defragged data region
-	int ninodes = block_buffer.super.ninodes;
-	
-	union fs_block* defrag_inode_table = malloc(sizeof(union fs_block) * ninodes);
-	
-	/* Iterate through inode blocks */
-	for (int i = INODE_TABLE_START_BLOCK; i <= ninodeblocks; i++) {
-		disk_read(i, block_buffer.data);
-		// Iterate through each inode in the block
-		for (int j = 0; j < INODES_PER_BLOCK; j++) {
-			// If inode is valid, add to defragged table and defrag data region
-			if ( !bitmap_test(inode_table_bitmap) && ), j
-		}
-		
-	}
-
-	return 0;
-}
