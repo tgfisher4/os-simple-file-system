@@ -363,7 +363,7 @@ int fs_read( int inumber, char *data, int length, int offset ) {
 
     // read superblock and check validity of inumber
     disk_read(0, buffer_block.data);
-    if ( inumber < 0 || inumber >= buffer_block.super.ninodes ) return 0;
+    if ( inumber <= 0 || inumber >= buffer_block.super.ninodes ) return 0;
     
     // read inode's corresponding block from disk
     int block = inumber / INODES_PER_BLOCK;
@@ -371,16 +371,16 @@ int fs_read( int inumber, char *data, int length, int offset ) {
 
     // choose correct inode from block and verify validity
     struct fs_inode inode = buffer_block.inodes[inumber % INODES_PER_BLOCK];
-    if ( !inode.isvalid || offset >= inode.size )   return 0;
+    if ( !inode.isvalid || offset > inode.size )   return 0;
     
     // read data byte-by-byte from direct pointers unless and until end 
     //int direct_blocks = min(DATA_POINTERS_PER_INODE, 1 + (inode.size / DATA_POINTERS_PER_BLOCK));
     int distance = min(length, inode.size - offset);
     int i = offset / DISK_BLOCK_SIZE;
     int j = offset % DISK_BLOCK_SIZE;
-    for ( ; i < DATA_POINTERS_PER_INODE && bytes_read <= distance; ++i, j=0 ) {
+    for ( ; i < DATA_POINTERS_PER_INODE && bytes_read < distance; ++i, j=0 ) {
         disk_read(inode.direct[i], buffer_block.data);
-        for ( ; j < DISK_BLOCK_SIZE && bytes_read <= distance; ++j ) {
+        for ( ; j < DISK_BLOCK_SIZE && bytes_read < distance; ++j ) {
             data[bytes_read++] = buffer_block.data[j];
         }
     }
@@ -389,16 +389,119 @@ int fs_read( int inumber, char *data, int length, int offset ) {
     disk_read(inode.indirect, buffer_block.data);
     int indirected_pointers[DATA_POINTERS_PER_BLOCK];
     memcpy(indirected_pointers, buffer_block.pointers, DATA_POINTERS_PER_BLOCK);    
-    for ( i -= DATA_POINTERS_PER_INODE; i < DATA_POINTERS_PER_BLOCK && bytes_read <= distance; ++i, j=0 ) {
+    for ( i -= DATA_POINTERS_PER_INODE; i < DATA_POINTERS_PER_BLOCK && bytes_read < distance; ++i, j=0 ) {
         disk_read(indirected_pointers[i], buffer_block.data);
-        for ( ; j < DISK_BLOCK_SIZE && bytes_read <= distance; ++j ) {
+        for ( ; j < DISK_BLOCK_SIZE && bytes_read < distance; ++j ) {
             data[bytes_read++] = buffer_block.data[j];
         }
     }
     
-    return --bytes_read;
+    return bytes_read;
 }
 
-int fs_write( int inumber, const char *data, int length, int offset ){
-    return 0;
+bool alloc_block( int *pointer, int nblocks ) {
+        int k = 0;
+        for ( ; k < nblocks && !bitmap_test(disk_block_bitmap, k); ++k );
+
+        if ( k == nblocks )     return false; // out of space cuh
+
+        bitmap_set(disk_block_bitmap, k, 0);
+        *pointer = k;
+
+        return true;
+}
+
+int fs_write( int inumber, const char *data, int length, int offset ) { // option: make read/write one funtion
+		union fs_block buffer_block;
+        int bytes_written = 0;
+
+        // read superblock and check validity of inumber
+        disk_read(0, buffer_block.data);
+        if ( inumber <= 0 || inumber >= buffer_block.super.ninodes )	return 0;
+
+        int nblocks = buffer_block.super.nblocks; // stash nblocks to search bitmap for free blocks
+
+        // read inode's corresponding block from disk
+        union fs_block inode_block;
+        int block = inumber / INODES_PER_BLOCK;
+        disk_read(block + INODE_TABLE_START_BLOCK, inode_block.data);
+
+        // choose correct inode from block and verify validity
+		// use address so that we can update this fs_block and write it back later
+        struct fs_inode *inode = &(inode_block.inodes[inumber % INODES_PER_BLOCK]);
+        if ( !inode->isvalid || offset > inode->size ) return 0; // accept big offset?
+
+        // compute number of pointers already allocated
+        int num_pointers = ((inode->size % DISK_BLOCK_SIZE) > 0) + (inode->size / DISK_BLOCK_SIZE);
+
+        // write data byte-by-byte to direct pointers
+        int i = offset / DISK_BLOCK_SIZE;
+        int j = offset % DISK_BLOCK_SIZE;
+        for ( ; i < DATA_POINTERS_PER_INODE && bytes_written < length; ++i, j=0 ) {
+                // allocate new block
+                if ( i >= num_pointers ) {
+                        if ( !alloc_block(&(inode->direct[i]), nblocks) ) {
+							// return sequence (could be functionized)
+        					inode->size = -min( -inode->size, -(offset + bytes_written) );
+        					disk_write( inumber/INODES_PER_BLOCK + INODE_TABLE_START_BLOCK, inode_block.data );
+        					return bytes_written;
+						}
+                }
+				
+                // descriptive comment here
+				disk_read(inode->direct[i], buffer_block.data);
+                for ( ; j < DISK_BLOCK_SIZE && bytes_written < length; ++j ) {
+						buffer_block.data[j] = data[bytes_written++];
+                }
+				disk_write(inode->direct[i], buffer_block.data);
+        }
+
+        // allocate new indirect block (if necessary)
+        union fs_block indirect_block;
+		int *indirected_pointers;
+        if ( inode->size < DATA_POINTERS_PER_INODE * DISK_BLOCK_SIZE && bytes_written < length ) {
+                if ( !alloc_block(&(inode->indirect), nblocks) ) {
+					// return sequence
+					inode->size = -min( -inode->size, -(offset + bytes_written) );
+					disk_write( inumber/INODES_PER_BLOCK + INODE_TABLE_START_BLOCK, inode_block.data );
+					return bytes_written;
+				}
+        } 
+		if ( bytes_written < length ) {
+        	disk_read(inode->indirect, indirect_block.data);
+        	indirected_pointers = indirect_block.pointers;
+		}
+		bool indirect_writeback = false;
+        // write data to indirect block (if necessary)
+
+        for ( i -= DATA_POINTERS_PER_INODE, num_pointers -= DATA_POINTERS_PER_INODE; i < DATA_POINTERS_PER_BLOCK && bytes_written < length; ++i, j=0 ) {	
+				// allocate new block
+                if ( i >= num_pointers ) {
+                        if ( !alloc_block(&(indirected_pointers[i]), nblocks) )	{
+							// return sequence
+							if (indirect_writeback) {
+								disk_write( inode->indirect, indirect_block.data );
+							}
+							inode->size = -min( -inode->size, -(offset + bytes_written) );
+							disk_write( inumber/INODES_PER_BLOCK + INODE_TABLE_START_BLOCK, inode_block.data );
+							return bytes_written;
+						}
+                		indirect_writeback = true;
+                }
+
+                disk_read(indirected_pointers[i], buffer_block.data);
+                for ( ; j < DISK_BLOCK_SIZE && bytes_written < length; ++j ) {
+						buffer_block.data[j] = data[bytes_written++];
+                }
+				disk_write(indirected_pointers[i], buffer_block.data);
+        }
+
+		// return sequence when it spills over to indirect block
+		if (indirect_writeback) {
+        	disk_write( inode->indirect, indirect_block.data );
+        }
+		// return sequence
+		inode->size = -min( -inode->size, -(offset + bytes_written) );
+        disk_write( inumber/INODES_PER_BLOCK + INODE_TABLE_START_BLOCK, inode_block.data );
+        return bytes_written;
 }
