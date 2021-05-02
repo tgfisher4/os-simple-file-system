@@ -241,8 +241,8 @@ void fs_debug(){
         printf("    size: %d bytes\n", inode.size);
         printf("    direct data blocks:");
         // walk data blocks for this inode
-        for( int block_num = walk_inode_data(0, &inode, NULL); block_num > 0; block_num = walk_inode_data(0, NULL, NULL) ){
-            if( block_num == DATA_POINTERS_PER_INODE ){
+        for( int block_num = walk_inode_data(0, &inode, NULL), i = 0; block_num > 0; block_num = walk_inode_data(0, NULL, NULL),i++ ){
+            if( i == DATA_POINTERS_PER_INODE ){
                 printf("\n    indirect block: %d", inode.indirect);
                 printf("\n    indirect data blocks:");
             }
