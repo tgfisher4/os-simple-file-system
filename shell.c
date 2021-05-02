@@ -154,6 +154,16 @@ int main( int argc, char *argv[] )
 			break;
 		} else if(!strcmp(cmd,"exit")) {
 			break;
+		} else if(!strcmp(cmd,"defrag")) {
+			if(args==1) {
+				if(fs_defrag()) {
+					printf("disk defragged.\n");
+				} else {
+					printf("defrag failed!\n");
+				}
+			} else {
+				printf("use: defrag\n");
+			}
 		} else {
 			printf("unknown command: %s\n",cmd);
 			printf("type 'help' for a list of commands.\n");
