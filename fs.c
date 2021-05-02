@@ -505,3 +505,129 @@ int fs_write( int inumber, const char *data, int length, int offset ) { // optio
         disk_write( inumber/INODES_PER_BLOCK + INODE_TABLE_START_BLOCK, inode_block.data );
         return bytes_written;
 }
+
+// Helper function for fs_debug; Moves a data block to a temporary defragged data region
+void move_block( int block_num, int index, union fs_block* defrag_data)
+{
+	union fs_block block_buffer;
+	disk_read(block_num, block_buffer.data)
+	memcpy(defrag_data + index, block_buffer.data, sizeof(union fs_block))
+}
+
+int fs_defrag()
+{
+
+	/*  Create a temporary inode table and data region to hold defragged data */
+	union fs_block block_buffer;
+	disk_read(0, block_buffer.data);
+
+	int defrag_inumber = 1; // Next available position in defragged inode table
+	int defrag_data_index = 0; // Next available position in defragged data region
+	int ninodeblocks = block_buffer.super.ninodeblocks;
+	int ninodes = block_buffer.super.ninodes;
+	int nblocks = block_buffer.super.nblocks;
+	
+	union fs_block* defrag_inode_table = malloc(sizeof(union fs_block) * ninodeblocks);
+	union fs_block* defrag_data = malloc(sizeof(union fs_block) * (nblocks - ninodeblocks - 1));
+	
+	/* Iterate through inode blocks */
+	for (int i = INODE_TABLE_START_BLOCK; i <= ninodeblocks; i++) {
+		disk_read(i, block_buffer.data);
+		// Iterate through each inode in the block
+		for (int j = 0; j < INODES_PER_BLOCK; j++) {
+
+			// If inode is valid and taken, add to defragged table and defrag data region
+
+			if ( (i == INODE_TABLE_START_BLOCK) && (j == 0 ) ) continue;
+
+			int inumber = (i - 1) * INODES_PER_BLOCK + j;
+			if ( !bitmap_test(inode_table_bitmap, inumber) ) {
+
+				/*  Add to defragged table */
+				int defrag_inode_offset = fs_get_inode_offset(defrag_inumber)
+				int inode_offset = fs_get_inode_offset(inumber);
+				union fs_block *defrag_block = defrag_inode_table + i - 1;
+
+				defrag_block->inodes[defrag_inode_offset] = block_buffer.inodes[inode_offset];
+				defrag_inumber++; // Increment inumber to be next available one
+				
+				/*  Defrag  data pointers */
+				
+				// Loop through indirect block's pointers and direct pointers separately
+				int num_blocks = (defrag_block->inodes[defrag_inode_offset].size + 4095) / 4096;
+				int direct_blocks = 0;
+				int indirect_blocks = 0;
+				if (num_blocks <= 5) {
+					direct_blocks = num_blocks;
+				} else {
+					direct_blocks = 5;
+					indirect_blocks = num_blocks - 5;
+				}
+
+				// Direct pointer blocks
+				for (int i = 0; i < num_blocks; i++) {
+					// Move to temp data region
+					int block_num = defrag_block->inodes[defrag_inode_offset].direct[i];
+					move_data(block_num, defrag_data_index, defrag_data);
+
+					// Update the inode direct pointers and defrag data index
+					defrag_block->inodes[defrag_inode_offset].direct[i] = defrag_data_index;
+					defrag_data_index++;
+				}
+	
+				// Indirect pointer blocks
+				if (indirect_blocks)
+				{
+					// Read the indirect block and create new indirect block
+					union fs_block defrag_indirect_block;
+					disk_read(defrag_block->inodes[defrag_inode_offset].indirect, defrag_indirect_block.data);
+
+					// Direct pointers inside indirect block
+					for (int i = 0; i < indirect_blocks; i++) {
+						int block_num = block_buffer.pointers[i];
+						move_data(block_num, defrag_data_index, defrag_data);
+
+						// Update the inode direct pointers and defrag data index
+						defrag_indirect_block.pointers[i] = defrag_data_index;
+						defrag_data_index++;
+					}
+
+					// Move the indirect block itself into defrag data
+					memcpy(defrag_data + defrag_data_index, defrag_indirect_block.data, sizeof(union fs_block))
+					defrag_data_index++;
+				}
+			}
+		}
+		
+		
+		
+	}
+	
+	/* Modify the inode bitmap */
+	inode_table_bitmap = inode_table_bitmap & 0;
+	for (int i = defrag_inumber; i <= ninodes; i++) {
+		bitmap_set(inode_table_bitmap, i, 1);
+	}
+
+	/* Write inode table to the disk */
+	for (int i = 0; i < ninodeblocks; i++) {
+		diskwrite(i+INODE_TABLE_START_BLOCK , (defrag_inode_table + i)->data);
+	}
+
+	/* Modify the data bitmap */
+	disk_block_bitmap = disk_block_bitmap & 0;
+	for (int i = defrag_data_index; i < nblocks - ninodeblocks - 1; i++) {
+		bitmap_set(disk_block_bitmap, i, 1);
+	}
+
+	/* Write data table to the disk */
+	for (int i = 0; i < nblocks - ninodeblocks - 1; i++) {
+		diskwrite(i + INODE_TABLE_START_BLOCK + ninodeblocks, (defrag_data + i)->data);
+	}
+
+	/* Free allocated structures */
+	free(defrag_inode_table);
+	free(defrag_data);
+
+	return 0;
+}
