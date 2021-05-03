@@ -69,7 +69,7 @@ bool     is_mounted = false;
 /* function definitions */
 // guidance from: https://stackoverflow.com/questions/10080832/c-i-need-some-guidance-in-how-to-create-dynamic-sized-bitmaps
 bitmap_t bitmap_create(int n_bits){
-    if( n_bits <= 0 ) return NULL;
+    if( n_bits < 0 ) return NULL;
     // add 7 to round integer division up
     bitmap_t to_return = malloc((sizeof(*to_return) * n_bits + 7) / 8);
     if( !to_return ){
@@ -262,7 +262,8 @@ int fs_mount(){
     disk_block_bitmap = bitmap_create(buffer_block.super.nblocks);
 
     // initialize data_region_bitmap: mark superblock and inode table blocks as allocated, rest as free
-    for( int i = 0; i < buffer_block.super.nblocks + 1; i++ ) bitmap_set(disk_block_bitmap, i, !(i < buffer_block.super.ninodeblocks + 1));
+    //for( int i = 0; i < buffer_block.super.nblocks + 1; i++ ) bitmap_set(disk_block_bitmap, i, !(i < buffer_block.super.ninodeblocks + 1)); // why does this have +1 in for condition?
+    for( int i = 0; i < buffer_block.super.nblocks; i++ ) bitmap_set(disk_block_bitmap, i, !(i < buffer_block.super.ninodeblocks + 1)); // +1 to include superblock
 
     struct fs_inode inode;
     bitmap_set(inode_table_bitmap, 0, 0); // inode 0 is not available for use
@@ -514,8 +515,7 @@ void move_block( int block_num, int index, union fs_block* defrag_data)
 	memcpy(defrag_data + index, block_buffer.data, sizeof(union fs_block));
 }
 
-int fs_defrag()
-{
+int fs_defrag(){
 
 	/*  Create a temporary inode table and data region to hold defragged data */
 	union fs_block block_buffer;
@@ -527,7 +527,7 @@ int fs_defrag()
 	int ninodes = block_buffer.super.ninodes;
 	int nblocks = block_buffer.super.nblocks;
 	
-	union fs_block* defrag_inode_table = malloc(sizeof(union fs_block) * ninodeblocks);
+	union fs_block* defrag_inode_table = calloc(ninodeblocks, sizeof(union fs_block)); // overkill, but sets all inodes in new table to invalid
 	union fs_block* defrag_data = malloc(sizeof(union fs_block) * (nblocks - ninodeblocks - 1));
 	
 	/* Iterate through inode blocks */
@@ -540,13 +540,14 @@ int fs_defrag()
 
 			if ( (i == INODE_TABLE_START_BLOCK) && (j == 0 ) ) continue;
 
-			int inumber = (i - 1) * INODES_PER_BLOCK + j;
+			int inumber = (i - INODE_TABLE_START_BLOCK) * INODES_PER_BLOCK + j;
 			if ( !bitmap_test(inode_table_bitmap, inumber) ) {
 
 				/*  Add to defragged table */
 				int defrag_inode_offset = defrag_inumber % INODES_PER_BLOCK;
-				int inode_offset = inumber % INODES_PER_BLOCK;
-				union fs_block *defrag_block = defrag_inode_table + i - 1;
+				int inode_offset = inumber % INODES_PER_BLOCK; // = j
+				//union fs_block *defrag_block = defrag_inode_table + i - INODE_TABLE_START_BLOCK; // should this be defrag_inumber / INODES_PER_BLOCK?
+				union fs_block *defrag_block = defrag_inode_table + defrag_inumber / INODES_PER_BLOCK;
 
 				defrag_block->inodes[defrag_inode_offset] = block_buffer.inodes[inode_offset];
 				defrag_inumber++; // Increment inumber to be next available one
@@ -554,7 +555,8 @@ int fs_defrag()
 				/*  Defrag  data pointers */
 				
 				// Loop through indirect block's pointers and direct pointers separately
-				int num_blocks = (defrag_block->inodes[defrag_inode_offset].size + 4095) / 4096;
+				//int num_blocks = (defrag_block->inodes[defrag_inode_offset].size + DISK_BLOCK_SIZE - 1) / DISK_BLOCK_SIZE;
+                int num_blocks = (block_buffer.inodes[inode_offset].size + DISK_BLOCK_SIZE - 1) / DISK_BLOCK_SIZE;
 				int direct_blocks = 0;
 				int indirect_blocks = 0;
 				if (num_blocks <= 5) {
@@ -565,13 +567,14 @@ int fs_defrag()
 				}
 
 				// Direct pointer blocks
-				for (int i = 0; i < direct_blocks; i++) {
+				for (int k = 0; k < direct_blocks; k++) {
 					// Move to temp data region
-					int block_num = defrag_block->inodes[defrag_inode_offset].direct[i];
+					//int block_num = defrag_block->inodes[defrag_inode_offset].direct[k];
+                    int block_num = block_buffer.inodes[inode_offset].direct[k];
 					move_block(block_num, defrag_data_index, defrag_data);
 
 					// Update the inode direct pointers and defrag data index
-					defrag_block->inodes[defrag_inode_offset].direct[i] = defrag_data_index;
+					defrag_block->inodes[defrag_inode_offset].direct[k] = defrag_data_index + INODE_TABLE_START_BLOCK + ninodeblocks;
 					defrag_data_index++;
 				}
 	
@@ -580,20 +583,24 @@ int fs_defrag()
 				{
 					// Read the indirect block and create new indirect block
 					union fs_block defrag_indirect_block;
-					disk_read(defrag_block->inodes[defrag_inode_offset].indirect, defrag_indirect_block.data);
+                    //union fs_block current_indirect_block;
+					//disk_read(block_buffer.inodes[inode_offset].indirect, current_indirect_block.data);
+					disk_read(block_buffer.inodes[inode_offset].indirect, defrag_indirect_block.data);
+					// disk_read(defrag_block->inodes[defrag_inode_offset].indirect, defrag_indirect_block.data);
 
 					// Direct pointers inside indirect block
-					for (int i = 0; i < indirect_blocks; i++) {
-						int block_num = block_buffer.pointers[i];
+					for (int k = 0; k < indirect_blocks; k++) {
+						int block_num = defrag_indirect_block.pointers[k];
 						move_block(block_num, defrag_data_index, defrag_data);
 
 						// Update the inode direct pointers and defrag data index
-						defrag_indirect_block.pointers[i] = defrag_data_index;
+						defrag_indirect_block.pointers[k] = defrag_data_index + INODE_TABLE_START_BLOCK + ninodeblocks;
 						defrag_data_index++;
 					}
 
 					// Move the indirect block itself into defrag data
 					memcpy(defrag_data + defrag_data_index, defrag_indirect_block.data, sizeof(union fs_block));
+                    defrag_block->inodes[defrag_inode_offset].indirect = defrag_data_index + INODE_TABLE_START_BLOCK + ninodeblocks;
 					defrag_data_index++;
 				}
 			}
@@ -605,9 +612,10 @@ int fs_defrag()
 	
 	/* Modify the inode bitmap */
 	for (int i = 1; i < defrag_inumber; i++) {
-		inode_table_bitmap[i / 8] ^= 1 << (i % 8);
+		//inode_table_bitmap[i / 8] ^= 1 << (i % 8);
+        bitmap_set(inode_table_bitmap, i, 0);
 	}
-	for (int i = defrag_inumber; i <= ninodes; i++) {
+	for (int i = defrag_inumber; i < ninodes; i++) {
 		bitmap_set(inode_table_bitmap, i, 1);
 	}
 
@@ -617,10 +625,11 @@ int fs_defrag()
 	}
 
 	/* Modify the data bitmap */
-	for (int i = 0; i < defrag_data_index; i++) {
-		disk_block_bitmap[i / 8] ^= 1 << (i % 8);
+	for (int i = 0; i < defrag_data_index + INODE_TABLE_START_BLOCK + ninodeblocks; i++) {
+		//disk_block_bitmap[i / 8] ^= 1 << (i % 8);
+		bitmap_set(disk_block_bitmap, i, 0);
 	}
-	for (int i = defrag_data_index; i < nblocks - ninodeblocks - 1; i++) {
+	for (int i = defrag_data_index + INODE_TABLE_START_BLOCK + ninodeblocks; i < nblocks - ninodeblocks - 1; i++) {
 		bitmap_set(disk_block_bitmap, i, 1);
 	}
 
