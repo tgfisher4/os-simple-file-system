@@ -22,6 +22,7 @@
 
 /* types */
 typedef unsigned char* bitmap_t;
+
 struct fs_superblock {
     int magic;
     int nblocks;
@@ -52,12 +53,13 @@ void     bitmap_delete(bitmap_t bitmap);
 bool     bitmap_test(bitmap_t bitmap, int idx);
 void     bitmap_set(bitmap_t bitmap, int idx, bool val);
 void     bitmap_print(bitmap_t bitmap, int n_bits);
-  
+
 int      min(int first, int second);
 
 void     load_inode(int inumber, struct fs_inode *inode);
 int      walk_inode_table(int from_inumber, struct fs_inode* inode);
 int      walk_inode_data(int for_inumber, struct fs_inode* for_inode, char *data);
+void     move_block(int block_num, int index, union fs_block* defrag_data);
 
 
 /* globals */
@@ -106,8 +108,8 @@ void bitmap_print(bitmap_t bitmap, int n_bits){
     }
     printf("BITMAP END\n");
 }
-  
-int min( int first, int second ) {
+
+int min(int first, int second) {
     return first < second ? first : second;
 }
 
@@ -192,7 +194,7 @@ int fs_format() {
     if (is_mounted) return 0;
 
     union fs_block buffer_block;
-    
+
     // read superblock
     disk_read(0, buffer_block.data);
     struct fs_superblock *superblock = &buffer_block.super;
@@ -332,7 +334,7 @@ int fs_delete( int inumber ){
     int block_num = INODE_TABLE_START_BLOCK + (inumber / INODES_PER_BLOCK);
     int block_offset = inumber % INODES_PER_BLOCK;
 
-    
+
     disk_read(block_num, block_buffer.data);
     if (block_buffer.inodes[block_offset].isvalid == 0) {
         // Return 0 -- attempting to delete an inode that's not yet created
@@ -345,10 +347,10 @@ int fs_delete( int inumber ){
     for ( int i = walk_inode_data(0, &block_buffer.inodes[block_offset], NULL); i > 0; i = walk_inode_data(0, NULL, NULL) ) {
         bitmap_set(disk_block_bitmap, i, 1);
     }
-    
+
     // Update the inode table bitmap
     bitmap_set(inode_table_bitmap, inumber, 1);
-    
+
     return 1;
 }
 
@@ -365,7 +367,7 @@ int fs_read( int inumber, char *data, int length, int offset ) {
     // read superblock and check validity of inumber
     disk_read(0, buffer_block.data);
     if ( inumber <= 0 || inumber >= buffer_block.super.ninodes ) return 0;
-    
+
     // read inode's corresponding block from disk
     int block = inumber / INODES_PER_BLOCK;
     disk_read(block + INODE_TABLE_START_BLOCK, buffer_block.data);
@@ -373,7 +375,7 @@ int fs_read( int inumber, char *data, int length, int offset ) {
     // choose correct inode from block and verify validity
     struct fs_inode inode = buffer_block.inodes[inumber % INODES_PER_BLOCK];
     if ( !inode.isvalid || offset > inode.size )   return 0;
-    
+
     // read data byte-by-byte from direct pointers unless and until end 
     //int direct_blocks = min(DATA_POINTERS_PER_INODE, 1 + (inode.size / DATA_POINTERS_PER_BLOCK));
     int distance = min(length, inode.size - offset);
@@ -396,251 +398,254 @@ int fs_read( int inumber, char *data, int length, int offset ) {
             data[bytes_read++] = buffer_block.data[j];
         }
     }
-    
+
     return bytes_read;
 }
 
 bool alloc_block( int *pointer, int nblocks ) {
-        int k = 0;
-        for ( ; k < nblocks && !bitmap_test(disk_block_bitmap, k); ++k );
+    int k = 0;
+    for ( ; k < nblocks && !bitmap_test(disk_block_bitmap, k); ++k );
 
-        if ( k == nblocks )     return false; // out of space cuh
+    if ( k == nblocks )     return false; // out of space cuh
 
-        bitmap_set(disk_block_bitmap, k, 0);
-        *pointer = k;
+    bitmap_set(disk_block_bitmap, k, 0);
+    *pointer = k;
 
-        return true;
+    return true;
 }
 
 int fs_write( int inumber, const char *data, int length, int offset ) { // option: make read/write one funtion
-		union fs_block buffer_block;
-        int bytes_written = 0;
+    union fs_block buffer_block;
+    int bytes_written = 0;
 
-        // read superblock and check validity of inumber
-        disk_read(0, buffer_block.data);
-        if ( inumber <= 0 || inumber >= buffer_block.super.ninodes )	return 0;
+    // read superblock and check validity of inumber
+    disk_read(0, buffer_block.data);
+    if ( inumber <= 0 || inumber >= buffer_block.super.ninodes )    return 0;
 
-        int nblocks = buffer_block.super.nblocks; // stash nblocks to search bitmap for free blocks
+    int nblocks = buffer_block.super.nblocks; // stash nblocks to search bitmap for free blocks
 
-        // read inode's corresponding block from disk
-        union fs_block inode_block;
-        int block = inumber / INODES_PER_BLOCK;
-        disk_read(block + INODE_TABLE_START_BLOCK, inode_block.data);
+    // read inode's corresponding block from disk
+    union fs_block inode_block;
+    int block = inumber / INODES_PER_BLOCK;
+    disk_read(block + INODE_TABLE_START_BLOCK, inode_block.data);
 
-        // choose correct inode from block and verify validity
-		// use address so that we can update this fs_block and write it back later
-        struct fs_inode *inode = &(inode_block.inodes[inumber % INODES_PER_BLOCK]);
-        if ( !inode->isvalid || offset > inode->size ) return 0; // accept big offset?
+    // choose correct inode from block and verify validity
+    // use address so that we can update this fs_block and write it back later
+    struct fs_inode *inode = &(inode_block.inodes[inumber % INODES_PER_BLOCK]);
+    if ( !inode->isvalid || offset > inode->size ) return 0; // accept big offset?
 
-        // compute number of pointers already allocated
-        int num_pointers = ((inode->size % DISK_BLOCK_SIZE) > 0) + (inode->size / DISK_BLOCK_SIZE);
+    // compute number of pointers already allocated
+    int num_pointers = ((inode->size % DISK_BLOCK_SIZE) > 0) + (inode->size / DISK_BLOCK_SIZE);
 
-        // write data byte-by-byte to direct pointers
-        int i = offset / DISK_BLOCK_SIZE;
-        int j = offset % DISK_BLOCK_SIZE;
-        for ( ; i < DATA_POINTERS_PER_INODE && bytes_written < length; ++i, j=0 ) {
-                // allocate new block
-                if ( i >= num_pointers ) {
-                        if ( !alloc_block(&(inode->direct[i]), nblocks) ) {
-							// return sequence (could be functionized)
-        					inode->size = -min( -inode->size, -(offset + bytes_written) );
-        					disk_write( inumber/INODES_PER_BLOCK + INODE_TABLE_START_BLOCK, inode_block.data );
-        					return bytes_written;
-						}
-                }
-				
-                // descriptive comment here
-				disk_read(inode->direct[i], buffer_block.data);
-                for ( ; j < DISK_BLOCK_SIZE && bytes_written < length; ++j ) {
-						buffer_block.data[j] = data[bytes_written++];
-                }
-				disk_write(inode->direct[i], buffer_block.data);
+    // write data byte-by-byte to direct pointers
+    int i = offset / DISK_BLOCK_SIZE;
+    int j = offset % DISK_BLOCK_SIZE;
+    for ( ; i < DATA_POINTERS_PER_INODE && bytes_written < length; ++i, j=0 ) {
+        // allocate new block
+        if ( i >= num_pointers ) {
+            if ( !alloc_block(&(inode->direct[i]), nblocks) ) {
+                // return sequence (could be functionized)
+                inode->size = -min( -inode->size, -(offset + bytes_written) );
+                disk_write( inumber/INODES_PER_BLOCK + INODE_TABLE_START_BLOCK, inode_block.data );
+                return bytes_written;
+            }
         }
 
-        // allocate new indirect block (if necessary)
-        union fs_block indirect_block;
-		int *indirected_pointers;
-        if ( inode->size < DATA_POINTERS_PER_INODE * DISK_BLOCK_SIZE && bytes_written < length ) {
-                if ( !alloc_block(&(inode->indirect), nblocks) ) {
-					// return sequence
-					inode->size = -min( -inode->size, -(offset + bytes_written) );
-					disk_write( inumber/INODES_PER_BLOCK + INODE_TABLE_START_BLOCK, inode_block.data );
-					return bytes_written;
-				}
-        } 
-		if ( bytes_written < length ) {
-        	disk_read(inode->indirect, indirect_block.data);
-        	indirected_pointers = indirect_block.pointers;
-		}
-		bool indirect_writeback = false;
-        // write data to indirect block (if necessary)
+        // descriptive comment here
+        disk_read(inode->direct[i], buffer_block.data);
+        for ( ; j < DISK_BLOCK_SIZE && bytes_written < length; ++j ) {
+            buffer_block.data[j] = data[bytes_written++];
+        }
+        disk_write(inode->direct[i], buffer_block.data);
+    }
 
-        for ( i -= DATA_POINTERS_PER_INODE, num_pointers -= DATA_POINTERS_PER_INODE; i < DATA_POINTERS_PER_BLOCK && bytes_written < length; ++i, j=0 ) {	
-				// allocate new block
-                if ( i >= num_pointers ) {
-                        if ( !alloc_block(&(indirected_pointers[i]), nblocks) )	{
-							// return sequence
-							if (indirect_writeback) {
-								disk_write( inode->indirect, indirect_block.data );
-							}
-							inode->size = -min( -inode->size, -(offset + bytes_written) );
-							disk_write( inumber/INODES_PER_BLOCK + INODE_TABLE_START_BLOCK, inode_block.data );
-							return bytes_written;
-						}
-                		indirect_writeback = true;
-                }
+    // allocate new indirect block (if necessary)
+    union fs_block indirect_block;
+    int *indirected_pointers;
+    if ( inode->size < DATA_POINTERS_PER_INODE * DISK_BLOCK_SIZE && bytes_written < length ) {
+        if ( !alloc_block(&(inode->indirect), nblocks) ) {
+            // return sequence
+            inode->size = -min( -inode->size, -(offset + bytes_written) );
+            disk_write( inumber/INODES_PER_BLOCK + INODE_TABLE_START_BLOCK, inode_block.data );
+            return bytes_written;
+        }
+    } 
+    if ( bytes_written < length ) {
+        disk_read(inode->indirect, indirect_block.data);
+        indirected_pointers = indirect_block.pointers;
+    }
+    bool indirect_writeback = false;
+    // write data to indirect block (if necessary)
 
-                disk_read(indirected_pointers[i], buffer_block.data);
-                for ( ; j < DISK_BLOCK_SIZE && bytes_written < length; ++j ) {
-						buffer_block.data[j] = data[bytes_written++];
+    for ( i -= DATA_POINTERS_PER_INODE, num_pointers -= DATA_POINTERS_PER_INODE; i < DATA_POINTERS_PER_BLOCK && bytes_written < length; ++i, j=0 ) {    
+        // allocate new block
+        if ( i >= num_pointers ) {
+            if ( !alloc_block(&(indirected_pointers[i]), nblocks) ) {
+                // return sequence
+                if (indirect_writeback) {
+                    disk_write( inode->indirect, indirect_block.data );
                 }
-				disk_write(indirected_pointers[i], buffer_block.data);
+                inode->size = -min( -inode->size, -(offset + bytes_written) );
+                disk_write( inumber/INODES_PER_BLOCK + INODE_TABLE_START_BLOCK, inode_block.data );
+                return bytes_written;
+            }
+            indirect_writeback = true;
         }
 
-		// return sequence when it spills over to indirect block
-		if (indirect_writeback) {
-        	disk_write( inode->indirect, indirect_block.data );
+        disk_read(indirected_pointers[i], buffer_block.data);
+        for ( ; j < DISK_BLOCK_SIZE && bytes_written < length; ++j ) {
+            buffer_block.data[j] = data[bytes_written++];
         }
-		// return sequence
-		inode->size = -min( -inode->size, -(offset + bytes_written) );
-        disk_write( inumber/INODES_PER_BLOCK + INODE_TABLE_START_BLOCK, inode_block.data );
-        return bytes_written;
+        disk_write(indirected_pointers[i], buffer_block.data);
+    }
+
+    // return sequence when it spills over to indirect block
+    if (indirect_writeback) {
+        disk_write( inode->indirect, indirect_block.data );
+    }
+    // return sequence
+    inode->size = -min( -inode->size, -(offset + bytes_written) );
+    disk_write( inumber/INODES_PER_BLOCK + INODE_TABLE_START_BLOCK, inode_block.data );
+    return bytes_written;
 }
 
 // Helper function for fs_debug; Moves a data block to a temporary defragged data region
-void move_block( int block_num, int index, union fs_block* defrag_data)
-{
-	union fs_block block_buffer;
-	disk_read(block_num, block_buffer.data);
-	memcpy(defrag_data + index, block_buffer.data, sizeof(union fs_block));
+void move_block(int block_num, int index, union fs_block* defrag_data){
+    union fs_block block_buffer;
+    disk_read(block_num, block_buffer.data);
+    memcpy(defrag_data + index, block_buffer.data, sizeof(union fs_block));
 }
 
 int fs_defrag(){
 
-	/*  Create a temporary inode table and data region to hold defragged data */
-	union fs_block block_buffer;
-	disk_read(0, block_buffer.data);
+    /*  Create a temporary inode table and data region to hold defragged data */
+    union fs_block block_buffer;
+    disk_read(0, block_buffer.data);
 
-	int defrag_inumber = 1; // Next available position in defragged inode table
-	int defrag_data_index = 0; // Next available position in defragged data region
-	int ninodeblocks = block_buffer.super.ninodeblocks;
-	int ninodes = block_buffer.super.ninodes;
-	int nblocks = block_buffer.super.nblocks;
-	
-	union fs_block* defrag_inode_table = calloc(ninodeblocks, sizeof(union fs_block)); // overkill, but sets all inodes in new table to invalid
-	union fs_block* defrag_data = malloc(sizeof(union fs_block) * (nblocks - ninodeblocks - 1));
-	
-	/* Iterate through inode blocks */
-	for (int i = INODE_TABLE_START_BLOCK; i <= ninodeblocks; i++) {
-		disk_read(i, block_buffer.data);
-		// Iterate through each inode in the block
-		for (int j = 0; j < INODES_PER_BLOCK; j++) {
+    int defrag_inumber = 1; // Next available position in defragged inode table
+    int defrag_data_index = 0; // Next available position in defragged data region
+    int ninodeblocks = block_buffer.super.ninodeblocks;
+    int ninodes = block_buffer.super.ninodes;
+    int nblocks = block_buffer.super.nblocks;
 
-			// If inode is valid and taken, add to defragged table and defrag data region
+    union fs_block* defrag_inode_table = calloc(ninodeblocks, sizeof(union fs_block)); // overkill, but sets all inodes in new table to invalid
+    union fs_block* defrag_data = malloc(sizeof(union fs_block) * (nblocks - ninodeblocks - 1));
+    if( !(defrag_inode_table && defrag_data) ){
+        printf("[ERROR] Failed to allocate memory. Exiting...\n");
+        abort();
+    }
 
-			if ( (i == INODE_TABLE_START_BLOCK) && (j == 0 ) ) continue;
+    /* Iterate through inode blocks */
+    for (int i = INODE_TABLE_START_BLOCK; i < INODE_TABLE_START_BLOCK + ninodeblocks; i++) {
+        disk_read(i, block_buffer.data);
+        // Iterate through each inode in the block
+        for (int j = 0; j < INODES_PER_BLOCK; j++) {
 
-			int inumber = (i - INODE_TABLE_START_BLOCK) * INODES_PER_BLOCK + j;
-			if ( !bitmap_test(inode_table_bitmap, inumber) ) {
+            // If inode is valid and taken, add to defragged table and defrag data region
 
-				/*  Add to defragged table */
-				int defrag_inode_offset = defrag_inumber % INODES_PER_BLOCK;
-				int inode_offset = inumber % INODES_PER_BLOCK; // = j
-				//union fs_block *defrag_block = defrag_inode_table + i - INODE_TABLE_START_BLOCK; // should this be defrag_inumber / INODES_PER_BLOCK?
-				union fs_block *defrag_block = defrag_inode_table + defrag_inumber / INODES_PER_BLOCK;
+            if ( (i == INODE_TABLE_START_BLOCK) && (j == 0 ) ) continue;
 
-				defrag_block->inodes[defrag_inode_offset] = block_buffer.inodes[inode_offset];
-				defrag_inumber++; // Increment inumber to be next available one
-				
-				/*  Defrag  data pointers */
-				
-				// Loop through indirect block's pointers and direct pointers separately
-				//int num_blocks = (defrag_block->inodes[defrag_inode_offset].size + DISK_BLOCK_SIZE - 1) / DISK_BLOCK_SIZE;
+            int inumber = (i - INODE_TABLE_START_BLOCK) * INODES_PER_BLOCK + j;
+            if ( !bitmap_test(inode_table_bitmap, inumber) ) {
+
+                /*  Add to defragged table */
+                int defrag_inode_offset = defrag_inumber % INODES_PER_BLOCK;
+                int inode_offset = inumber % INODES_PER_BLOCK; // = j
+                //union fs_block *defrag_block = defrag_inode_table + i - INODE_TABLE_START_BLOCK; // should this be defrag_inumber / INODES_PER_BLOCK?
+                union fs_block *defrag_block = defrag_inode_table + defrag_inumber / INODES_PER_BLOCK;
+
+                defrag_block->inodes[defrag_inode_offset] = block_buffer.inodes[inode_offset];
+                defrag_inumber++; // Increment inumber to be next available one
+
+                /*  Defrag  data pointers */
+
+                // Loop through indirect block's pointers and direct pointers separately
+                //int num_blocks = (defrag_block->inodes[defrag_inode_offset].size + DISK_BLOCK_SIZE - 1) / DISK_BLOCK_SIZE;
                 int num_blocks = (block_buffer.inodes[inode_offset].size + DISK_BLOCK_SIZE - 1) / DISK_BLOCK_SIZE;
-				int direct_blocks = 0;
-				int indirect_blocks = 0;
-				if (num_blocks <= 5) {
-					direct_blocks = num_blocks;
-				} else {
-					direct_blocks = 5;
-					indirect_blocks = num_blocks - 5;
-				}
+                int direct_blocks = 0;
+                int indirect_blocks = 0;
+                if (num_blocks <= 5) {
+                    direct_blocks = num_blocks;
+                } else {
+                    direct_blocks = 5;
+                    indirect_blocks = num_blocks - 5;
+                }
 
-				// Direct pointer blocks
-				for (int k = 0; k < direct_blocks; k++) {
-					// Move to temp data region
-					//int block_num = defrag_block->inodes[defrag_inode_offset].direct[k];
+                // Direct pointer blocks
+                for (int k = 0; k < direct_blocks; k++) {
+                    // Move to temp data region
+                    //int block_num = defrag_block->inodes[defrag_inode_offset].direct[k];
                     int block_num = block_buffer.inodes[inode_offset].direct[k];
-					move_block(block_num, defrag_data_index, defrag_data);
+                    move_block(block_num, defrag_data_index, defrag_data);
 
-					// Update the inode direct pointers and defrag data index
-					defrag_block->inodes[defrag_inode_offset].direct[k] = defrag_data_index + INODE_TABLE_START_BLOCK + ninodeblocks;
-					defrag_data_index++;
-				}
-	
-				// Indirect pointer blocks
-				if (indirect_blocks)
-				{
-					// Read the indirect block and create new indirect block
-					union fs_block defrag_indirect_block;
+                    // Update the inode direct pointers and defrag data index
+                    defrag_block->inodes[defrag_inode_offset].direct[k] = defrag_data_index + INODE_TABLE_START_BLOCK + ninodeblocks;
+                    defrag_data_index++;
+                }
+
+                // Indirect pointer blocks
+                if (indirect_blocks)
+                {
+                    // Read the indirect block and create new indirect block
+                    union fs_block defrag_indirect_block;
                     //union fs_block current_indirect_block;
-					//disk_read(block_buffer.inodes[inode_offset].indirect, current_indirect_block.data);
-					disk_read(block_buffer.inodes[inode_offset].indirect, defrag_indirect_block.data);
-					// disk_read(defrag_block->inodes[defrag_inode_offset].indirect, defrag_indirect_block.data);
+                    //disk_read(block_buffer.inodes[inode_offset].indirect, current_indirect_block.data);
+                    disk_read(block_buffer.inodes[inode_offset].indirect, defrag_indirect_block.data);
+                    // disk_read(defrag_block->inodes[defrag_inode_offset].indirect, defrag_indirect_block.data);
 
-					// Direct pointers inside indirect block
-					for (int k = 0; k < indirect_blocks; k++) {
-						int block_num = defrag_indirect_block.pointers[k];
-						move_block(block_num, defrag_data_index, defrag_data);
+                    // Direct pointers inside indirect block
+                    for (int k = 0; k < indirect_blocks; k++) {
+                        int block_num = defrag_indirect_block.pointers[k];
+                        move_block(block_num, defrag_data_index, defrag_data);
 
-						// Update the inode direct pointers and defrag data index
-						defrag_indirect_block.pointers[k] = defrag_data_index + INODE_TABLE_START_BLOCK + ninodeblocks;
-						defrag_data_index++;
-					}
+                        // Update the inode direct pointers and defrag data index
+                        defrag_indirect_block.pointers[k] = defrag_data_index + INODE_TABLE_START_BLOCK + ninodeblocks;
+                        defrag_data_index++;
+                    }
 
-					// Move the indirect block itself into defrag data
-					memcpy(defrag_data + defrag_data_index, defrag_indirect_block.data, sizeof(union fs_block));
+                    // Move the indirect block itself into defrag data
+                    memcpy(defrag_data + defrag_data_index, defrag_indirect_block.data, sizeof(union fs_block));
                     defrag_block->inodes[defrag_inode_offset].indirect = defrag_data_index + INODE_TABLE_START_BLOCK + ninodeblocks;
-					defrag_data_index++;
-				}
-			}
-		}
-		
-		
-		
-	}
-	
-	/* Modify the inode bitmap */
-	for (int i = 1; i < defrag_inumber; i++) {
-		//inode_table_bitmap[i / 8] ^= 1 << (i % 8);
+                    defrag_data_index++;
+                }
+            }
+        }
+
+
+
+    }
+
+    /* Modify the inode bitmap */
+    for (int i = 1; i < defrag_inumber; i++) {
+        //inode_table_bitmap[i / 8] ^= 1 << (i % 8);
         bitmap_set(inode_table_bitmap, i, 0);
-	}
-	for (int i = defrag_inumber; i < ninodes; i++) {
-		bitmap_set(inode_table_bitmap, i, 1);
-	}
+    }
+    for (int i = defrag_inumber; i < ninodes; i++) {
+        bitmap_set(inode_table_bitmap, i, 1);
+    }
 
-	/* Write inode table to the disk */
-	for (int i = 0; i < ninodeblocks; i++) {
-		disk_write(i+INODE_TABLE_START_BLOCK , (defrag_inode_table + i)->data);
-	}
+    /* Write inode table to the disk */
+    for (int i = 0; i < ninodeblocks; i++) {
+        disk_write(i+INODE_TABLE_START_BLOCK , (defrag_inode_table + i)->data);
+    }
 
-	/* Modify the data bitmap */
-	for (int i = 0; i < defrag_data_index + INODE_TABLE_START_BLOCK + ninodeblocks; i++) {
-		//disk_block_bitmap[i / 8] ^= 1 << (i % 8);
-		bitmap_set(disk_block_bitmap, i, 0);
-	}
-	for (int i = defrag_data_index + INODE_TABLE_START_BLOCK + ninodeblocks; i < nblocks - ninodeblocks - 1; i++) {
-		bitmap_set(disk_block_bitmap, i, 1);
-	}
+    /* Modify the data bitmap */
+    for (int i = 0; i < defrag_data_index + INODE_TABLE_START_BLOCK + ninodeblocks; i++) {
+        //disk_block_bitmap[i / 8] ^= 1 << (i % 8);
+        bitmap_set(disk_block_bitmap, i, 0);
+    }
+    for (int i = defrag_data_index + INODE_TABLE_START_BLOCK + ninodeblocks; i < nblocks - ninodeblocks - 1; i++) {
+        bitmap_set(disk_block_bitmap, i, 1);
+    }
 
-	/* Write data table to the disk */
-	for (int i = 0; i < nblocks - ninodeblocks - 1; i++) {
-		disk_write(i + INODE_TABLE_START_BLOCK + ninodeblocks, (defrag_data + i)->data);
-	}
+    /* Write data table to the disk */
+    for (int i = 0; i < nblocks - ninodeblocks - 1; i++) {
+        disk_write(i + INODE_TABLE_START_BLOCK + ninodeblocks, (defrag_data + i)->data);
+    }
 
-	/* Free allocated structures */
-	free(defrag_inode_table);
-	free(defrag_data);
+    /* Free allocated structures */
+    free(defrag_inode_table);
+    free(defrag_data);
 
-	return 1;
+    return 1;
 }
