@@ -355,8 +355,20 @@ int fs_delete( int inumber ){
 }
 
 int fs_getsize( int inumber ){
-    if( !is_mounted ) return 0;
-    return -1;
+    if( !is_mounted ) return -1; // Not 0, because 0 can still be a valid inode size
+
+    union fs_block buffer_block;
+
+    // reading superblock to see if inumber is valid
+    disk_read(0, buffer_block.data);
+    if (inumber <= 0 || inumber >= buffer_block.super.ninodes) return -1;
+
+    struct fs_inode inode_to_check = buffer_block.inodes[inumber];
+
+    // if inode is not valid, then return -1
+    if (!inode_to_check.isvalid) return -1;
+
+    return inode_to_check.size;
 }
 
 int fs_read( int inumber, char *data, int length, int offset ) {

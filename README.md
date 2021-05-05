@@ -6,4 +6,5 @@ Group members:
     - Jason Brown,
     - Graham Fisher
     - Lukasz Matwiejczyk
+    - Nicole Lee
 
