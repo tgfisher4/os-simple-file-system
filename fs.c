@@ -118,7 +118,7 @@ void load_inode(int inumber, struct fs_inode *inode){
     int inode_block_idx = inumber % INODES_PER_BLOCK;
 
     union fs_block buffer_block;
-    disk_read(inode_table_idx, buffer_block.data);
+    disk_read(inode_table_idx + INODE_TABLE_START_BLOCK, buffer_block.data);
     memcpy(inode, &buffer_block.inodes[inode_block_idx], sizeof(struct fs_inode));
 }
 
