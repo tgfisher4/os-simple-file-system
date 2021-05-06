@@ -1,2 +1,48 @@
 SimpleFS: EC.txt
+Jason Brown, Graham Fisher, Lukasz Matwieczyk, Nicole Lee 
+
+At a high level: 
+
+To defragment our disk, we first start by creating a temporary inode table and data region that will hold the 
+defragmented file system, which will eventually be copied back and overwrite the current undirected file system.
+To do this, we loop through all the current blocks and each inode within, adding them to the first available 
+spot in the appropriate defragmented structures. This is kept track of with an index counter which will be updated
+upon each new entry into the defragmented structure. When all the copying has been completed, we then overwrite 
+all the current structures with their defragmented counterparts, and free the previously created temporary 
+structures.
+
+Our detailed approach to fs_defrag():
+
+- Create a temporary inode table and data region that will temporarily hold the defragmented version of the disk. 
+All the inodes in this new table will be initially set to 0.
+- Read the contents of the current disk, inode table, and data block.
+- Start looping through all of the inode blocks in the current disk, and within that, iterate through each inode
+in the block.
+- If the inode is valid and taken, then copy that inode into the first open spot in the temporary defrag_inode_table,
+and the data to the defrag_data table.
+- Once added, increment the defrag inumber to the next available one.
+- Now, it's time to defragment the data pointers. Start by looping through the current indirect blocks' pointers 
+and the direct pointers separately. Set the number of indirect and direct blocks.
+- Direct Pointer Blocks:
+	- Loop through all the direct blocks, and copy the direct pointer blocks to the temporary defrag_data table. 
+	Within each loop, update the inode direct pointers in the defrag_inode_table and increment the defrag_data_index.
+- Indirect Pointer Blocks:
+	- If there are any indirect pointer blocks, create a new indirect pointer block and read it in from the disk.
+	- Copy the direct pointers inside the indirect block into the defrag_data table.
+	- Update the inode direct pointers in the defrag indirect block, and increment defrag_data_index.
+	- Move that indirect block itself into the temp defrag_data region.
+- Modify Inode Bitmap:
+	- To update the current inode bitmap to reflect the defragmented one, we first set all the bits from inode #1 to 
+	the defrag_inumber to be 0. 
+	- Then, we set all the rest of the inode bitmaps from defrag_inumber to ninodes to be 1, in order to show that they
+	are available.
+- Write Inode Table to Disk:
+	- Update the inode table with the defrag_inode_table, by iterating from 0 to ninode blocks, and writing to the disk.
+- Modify Data Bitmap:
+	- Update the data bitmap to reflect the defragmented one. First, have a loop that goes from 0 to defrag_inode_index
+	+ INODE_TABLE_START_BLOCK and set those bits to 0. Then, set the remaining bits in the data bitmap to 1.
+- Write Daata Table to Disk:
+	- Loop from 0 to nblocks - ninodeblocks - 1, in order to write the data table to the disk. 
+- Free the temporarily allocated structures: defrag_inode_table and defrag_data, as the disk has already been updated 
+to contain the defragmented version of the file system.
 
