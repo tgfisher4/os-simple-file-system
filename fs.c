@@ -363,7 +363,8 @@ int fs_getsize( int inumber ){
     disk_read(0, buffer_block.data);
     if (inumber <= 0 || inumber >= buffer_block.super.ninodes) return -1;
 
-    struct fs_inode inode_to_check = buffer_block.inodes[inumber];
+    struct fs_inode inode_to_check;
+    load_inode(inumber, &inode_to_check);
 
     // if inode is not valid, then return -1
     if (!inode_to_check.isvalid) return -1;
