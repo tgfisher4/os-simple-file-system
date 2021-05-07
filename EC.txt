@@ -46,3 +46,40 @@ and the direct pointers separately. Set the number of indirect and direct blocks
 - Free the temporarily allocated structures: defrag_inode_table and defrag_data, as the disk has already been updated 
 to contain the defragmented version of the file system.
 
+Example of fs_defrag's effect:
+ simplefs> debug
+superblock:
+    magic number is valid
+    20 blocks total on disk
+    2 blocks dedicated to inode table on disk
+    256 total spots in inode table
+inode 2:
+    size: 20480 bytes
+    direct data blocks: 6 7 9 10 11
+inode 3:
+    size: 24698 bytes
+    direct data blocks: 12 13 14 15 16
+    indirect block: 17
+    indirect data blocks: 18 19
+inode 5:
+    size: 5075 bytes
+    direct data blocks: 4 5
+ simplefs> defrag
+disk defragged.
+ simplefs> debug
+superblock:
+    magic number is valid
+    20 blocks total on disk
+    2 blocks dedicated to inode table on disk
+    256 total spots in inode table
+inode 1:
+    size: 20480 bytes
+    direct data blocks: 3 4 5 6 7
+inode 2:
+    size: 24698 bytes
+    direct data blocks: 8 9 10 11 12
+    indirect block: 15
+    indirect data blocks: 13 14
+inode 3:
+    size: 5075 bytes
+    direct data blocks: 16 17
